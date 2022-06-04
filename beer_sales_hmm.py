@@ -9,8 +9,6 @@ import numpy as np
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-n_epochs = 5
-
 # TODO decide where to put these
 mn_norm_data_val, mx_norm_data_val = 0, 1
 n_bins = 10
@@ -68,6 +66,7 @@ class HMM(torch.nn.Module):
         # dimensions: [width, n_bins]
         if pr_i is None:
             pr_i = torch.randn(width, n_bins)
+            pr_i = nn.functional.softmax(pr_i, dim=1)
 
         self.input_distros = nn.Parameter(pr_i, requires_grad=True)
 
@@ -103,7 +102,7 @@ class HMM(torch.nn.Module):
                 # apply dense weights
                 # feed through sum layer
 
-                # TODO convert this to log-domain
+                # multiply by log(dense_weights)
                 x = x + log_dense_weights
 
                 x = torch.logsumexp(x, dim=1)
@@ -113,7 +112,7 @@ class HMM(torch.nn.Module):
                 x = x + log_pr_x
 
             print("X: "+str(x))
-            y[window_i] = torch.logsumexp(x)
+            y[window_i] = torch.logsumexp(x, dim=0)
 
         y = torch.exp(y)
         print("Y: "+str(y))
@@ -123,8 +122,9 @@ class HMM(torch.nn.Module):
 def main():
     window_size = 12
     learning_rate = 0.1
-    batch_size = 5
+    batch_size = 1
     width = 5
+    n_epochs = 5
 
     alcohol_ds = CustomDataset("Alcohol_Sales.csv", 'DATE', 'S4248SM144NCEN', window_size, batch_size)
 
@@ -147,19 +147,20 @@ def main():
 
             print("Batch LLs: "+str(batch_lls))
 
-            loss = -torch.sum(batch_lls, -1)
+            loss = -torch.sum(batch_lls, dim=-1)
             loss.requires_grad = True
+
+            # TODO debug this, gives same output/loss on each epoch/batch
             loss.backward()
             optim.step()
 
-            # TODO figure out what this is
             print(batch_lls.tolist()[0])
             epoch_lls.extend(torch.flatten(batch_lls).tolist())
 
         lls.append(epoch_lls)
 
     lls = torch.Tensor(lls)
-    print(lls.shape)
+    print(lls)
     model.to('cpu')
     ll = torch.mean(lls)
     print(ll)
