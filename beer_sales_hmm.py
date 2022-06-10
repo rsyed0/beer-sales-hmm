@@ -4,12 +4,14 @@ from torch import nn
 import pandas as pd
 import numpy as np
 
+import sys
+
 # TODO add month as a feature
 # TODO implement >1 stride lengths
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-# TODO decide where to put these
+# TODO decide how to implement
 mn_norm_data_val, mx_norm_data_val = 0, 1
 n_bins = 10
 norm_data_range = mx_norm_data_val - mn_norm_data_val
@@ -66,20 +68,22 @@ class HMM(torch.nn.Module):
         # dimensions: [width, n_bins]
         if pr_i is None:
             pr_i = torch.randn(width, n_bins)
-            pr_i = nn.functional.softmax(pr_i, dim=1)
+            #pr_i = nn.functional.softmax(pr_i, dim=1)
 
         self.input_distros = nn.Parameter(pr_i, requires_grad=True)
 
+        #print(self.input_distros)
+
         # dimensions: [length-1, width, width]
-        # TODO use nn.Linear layer instead?
-        # TODO use softmax, ensure all weights per-node sum to 1
         dense_layer_weights = torch.randn(length-1, width, width)
         self.dense_layer_weights = nn.Parameter(dense_layer_weights, requires_grad=True)
+
+        #print(self.dense_layer_weights)
 
 
     def forward(self, data):
         batch_size, window_size = data.shape
-        print("Data: "+str(data))
+        #print("Data: "+str(data))
         #print(type(data))
 
         assert window_size == self.length
@@ -92,36 +96,49 @@ class HMM(torch.nn.Module):
         for window_i in range(batch_size):
             window = data[window_i] #.cpu().detach().numpy()
 
-            x = torch.Tensor([log_leafs[distr_i][min(n_bins-1, int(window[0] // bin_width))] for distr_i in range(self.width)])
+            #x = torch.Tensor([log_leafs[distr_i][min(n_bins-1, int(window[0] // bin_width))] for distr_i in range(self.width)])
+            x = log_leafs[:, min(n_bins-1, int(window[0] // bin_width))]
+            #print("X: "+str(x))
 
             for layer_i in range(self.length-1):
                 
                 # shape: [width, width]
                 log_dense_weights = nn.functional.log_softmax(self.dense_layer_weights[layer_i], dim=-1)
+                #print("log(dense_weights): "+str(log_dense_weights))
 
                 # apply dense weights
                 # feed through sum layer
 
-                # multiply by log(dense_weights)
+                # multiply by log(dense_weights) and sum
                 x = x + log_dense_weights
-
                 x = torch.logsumexp(x, dim=1)
 
-                # feed through product layer
-                log_pr_x = torch.Tensor([log_leafs[distr_i][min(n_bins-1, int(window[layer_i+1] // bin_width))] for distr_i in range(self.width)])
-                x = x + log_pr_x
+                #print("after sum units: "+str(x))
 
-            print("X: "+str(x))
+                # feed through product layer
+                log_pr_x = log_leafs[:, min(n_bins-1, int(window[layer_i+1] // bin_width))]
+                #print("log(pr_x): "+str(log_pr_x))
+
+                # avoid using native Python lists/list comprehension
+                # may interfere with nn.Parameter updates
+                #log_pr_x = torch.Tensor([log_leafs[distr_i][min(n_bins-1, int(window[layer_i+1] // bin_width))] for distr_i in range(self.width)])
+
+                x = x + log_pr_x
+                #print("after product units: "+str(x))
+
+            #print("X: "+str(x))
             y[window_i] = torch.logsumexp(x, dim=0)
 
         y = torch.exp(y)
-        print("Y: "+str(y))
+        #print("Y: "+str(y))
+
+        #sys.exit()
         return y
 
 
 def main():
     window_size = 12
-    learning_rate = 0.1
+    learning_rate = 0.5
     batch_size = 1
     width = 5
     n_epochs = 5
@@ -145,7 +162,7 @@ def main():
             batch = batch.to(device)
             batch_lls = model(batch)
 
-            print("Batch LLs: "+str(batch_lls))
+            #print("Batch LLs: "+str(batch_lls))
 
             loss = -torch.sum(batch_lls, dim=-1)
             loss.requires_grad = True
@@ -154,7 +171,7 @@ def main():
             loss.backward()
             optim.step()
 
-            print(batch_lls.tolist()[0])
+            #print(batch_lls.tolist()[0])
             epoch_lls.extend(torch.flatten(batch_lls).tolist())
 
         lls.append(epoch_lls)
