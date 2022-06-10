@@ -91,55 +91,47 @@ class HMM(torch.nn.Module):
         # using log-domain
         log_leafs = nn.functional.log_softmax(self.input_distros, dim=-1)
 
-        y = torch.zeros(batch_size, 1).to(data.device)
+        #print(data)
+        data.apply_(xtb)
+        #print(data)
 
-        for window_i in range(batch_size):
-            window = data[window_i] #.cpu().detach().numpy()
+        x = log_leafs[:, data[:,0].long()] #min(n_bins-1, int(data[:,0] // bin_width))]
 
-            #x = torch.Tensor([log_leafs[distr_i][min(n_bins-1, int(window[0] // bin_width))] for distr_i in range(self.width)])
-            x = log_leafs[:, min(n_bins-1, int(window[0] // bin_width))]
-            #print("X: "+str(x))
+        # working w 1d values instead of scalars
+        for layer_i in range(self.length-1):
+            
+            # shape: [width, width]
+            log_dense_weights = nn.functional.log_softmax(self.dense_layer_weights[layer_i], dim=-1)
+            #print("log(dense_weights): "+str(log_dense_weights))
 
-            for layer_i in range(self.length-1):
-                
-                # shape: [width, width]
-                log_dense_weights = nn.functional.log_softmax(self.dense_layer_weights[layer_i], dim=-1)
-                #print("log(dense_weights): "+str(log_dense_weights))
+            # apply dense weights
+            # feed through sum layer
 
-                # apply dense weights
-                # feed through sum layer
+            # multiply by log(dense_weights) and sum
+            x = x + log_dense_weights
+            x = torch.logsumexp(x, dim=1)
 
-                # multiply by log(dense_weights) and sum
-                x = x + log_dense_weights
-                x = torch.logsumexp(x, dim=1)
+            # TODO match shapes
 
-                #print("after sum units: "+str(x))
+            # feed through product layer
+            #input_ids = data[:,layer_i+1]
+            #input_ids.apply_(xtb)
+            log_pr_x = log_leafs[:, data[:,layer_i+1].long()] #min(n_bins-1, int(data[:,layer_i+1] // bin_width))]
+            x = x + log_pr_x
 
-                # feed through product layer
-                log_pr_x = log_leafs[:, min(n_bins-1, int(window[layer_i+1] // bin_width))]
-                #print("log(pr_x): "+str(log_pr_x))
+        y = torch.exp(torch.logsumexp(x, dim=0))
+        print("Y: "+str(y))
 
-                # avoid using native Python lists/list comprehension
-                # may interfere with nn.Parameter updates
-                #log_pr_x = torch.Tensor([log_leafs[distr_i][min(n_bins-1, int(window[layer_i+1] // bin_width))] for distr_i in range(self.width)])
-
-                x = x + log_pr_x
-                #print("after product units: "+str(x))
-
-            #print("X: "+str(x))
-            y[window_i] = torch.logsumexp(x, dim=0)
-
-        y = torch.exp(y)
-        #print("Y: "+str(y))
-
-        #sys.exit()
         return y
+
+def xtb(x):
+    return int(min(n_bins-1, x // bin_width))
 
 
 def main():
     window_size = 12
     learning_rate = 0.5
-    batch_size = 1
+    batch_size = 5
     width = 5
     n_epochs = 5
 
@@ -154,8 +146,10 @@ def main():
 
     for epoch_i in range(n_epochs):
         epoch_lls = []
+        #print([p for p in model.parameters()])
 
         # run/train fixed context window over one batch
+        # TODO switch to using DataLoader
         for batch, _ in alcohol_ds:
             optim.zero_grad()
 
@@ -165,11 +159,13 @@ def main():
             #print("Batch LLs: "+str(batch_lls))
 
             loss = -torch.sum(batch_lls, dim=-1)
-            loss.requires_grad = True
+            #loss.requires_grad = True
 
             # TODO debug this, gives same output/loss on each epoch/batch
             loss.backward()
             optim.step()
+
+            #sys.exit()
 
             #print(batch_lls.tolist()[0])
             epoch_lls.extend(torch.flatten(batch_lls).tolist())
