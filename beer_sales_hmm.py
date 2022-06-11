@@ -52,6 +52,19 @@ class CustomDataset(torch.utils.data.Dataset):
         #print(idx, window.shape)
         return window, label
 
+# this works...
+class Test(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        a = torch.randn(12)
+        self.a = nn.Parameter(a, requires_grad=True)
+
+    def forward(self, data):
+        y = torch.sum(self.a * data, dim=-1)
+        print(y)
+        return y
+
 
 class HMM(torch.nn.Module):
     def __init__(self, width, length, pr_i=None):
@@ -95,32 +108,35 @@ class HMM(torch.nn.Module):
         data.apply_(xtb)
         #print(data)
 
-        x = log_leafs[:, data[:,0].long()] #min(n_bins-1, int(data[:,0] // bin_width))]
+        #x = log_leafs[:, data[:,0].long()]
+        y = log_leafs[:, data[:,0].long()] #min(n_bins-1, int(data[:,0] // bin_width))]
 
         # working w 1d values instead of scalars
         for layer_i in range(self.length-1):
             
             # shape: [width, width]
-            log_dense_weights = nn.functional.log_softmax(self.dense_layer_weights[layer_i], dim=-1)
+            #log_dense_weights = nn.functional.log_softmax(self.dense_layer_weights[layer_i], dim=-1)
             #print("log(dense_weights): "+str(log_dense_weights))
 
             # apply dense weights
             # feed through sum layer
 
             # multiply by log(dense_weights) and sum
-            x = x + log_dense_weights
-            x = torch.logsumexp(x, dim=1)
+            #x = x + log_dense_weights
+            #x = torch.logsumexp(x)
 
             # TODO match shapes
 
             # feed through product layer
             #input_ids = data[:,layer_i+1]
             #input_ids.apply_(xtb)
-            log_pr_x = log_leafs[:, data[:,layer_i+1].long()] #min(n_bins-1, int(data[:,layer_i+1] // bin_width))]
-            x = x + log_pr_x
+            #log_pr_x = log_leafs[:, data[:,layer_i+1].long()] #min(n_bins-1, int(data[:,layer_i+1] // bin_width))]
+            #x = x + log_pr_x
 
-        y = torch.exp(torch.logsumexp(x, dim=0))
-        print("Y: "+str(y))
+            y = torch.logsumexp(y + nn.functional.log_softmax(self.dense_layer_weights[layer_i], dim=-1), dim=1) + log_leafs[:, data[:,layer_i+1].long()]
+
+        y = torch.exp(torch.logsumexp(y, dim=0))
+        #print("Y: "+str(y))
 
         return y
 
@@ -130,19 +146,19 @@ def xtb(x):
 
 def main():
     window_size = 12
-    learning_rate = 0.5
+    learning_rate = 0.1
     batch_size = 5
     width = 5
-    n_epochs = 5
+    n_epochs = 15
 
     alcohol_ds = CustomDataset("Alcohol_Sales.csv", 'DATE', 'S4248SM144NCEN', window_size, batch_size)
 
     # TODO decide how/if to initialize pr_i
-    model = HMM(width, window_size)
+    model = HMM(width, window_size) #Test()
     model.to(device)
 
     lls = []
-    optim = torch.optim.SGD(model.parameters(), lr=learning_rate)
+    optim = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
     for epoch_i in range(n_epochs):
         epoch_lls = []
@@ -160,6 +176,7 @@ def main():
 
             loss = -torch.sum(batch_lls, dim=-1)
             #loss.requires_grad = True
+            loss.retain_grad()
 
             # TODO debug this, gives same output/loss on each epoch/batch
             loss.backward()
@@ -177,6 +194,7 @@ def main():
     model.to('cpu')
     ll = torch.mean(lls)
     print(ll)
+    print(torch.mean(lls[-1]))
 
 if __name__ == "__main__":
     main()
