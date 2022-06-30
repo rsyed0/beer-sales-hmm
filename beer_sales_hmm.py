@@ -4,11 +4,21 @@ from torch import nn
 import pandas as pd
 import numpy as np
 
+import matplotlib.pyplot as plt
+
+from math import exp
+
 import sys
 
 # TODO add month as a feature
 # TODO implement >1 stride lengths
 # TODO model the residuals and subtract assumed growth
+
+window_size = 2
+learning_rate = 0.05
+batch_size = 5
+width = 5
+n_epochs = 25
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
@@ -34,6 +44,9 @@ class CustomDataset(torch.utils.data.Dataset):
         mn_target_data, mx_target_data = torch.aminmax(target_data)
         self.norm_target_data = np.array([(x - mn_target_data) / (mx_target_data - mn_target_data) for x in target_data])
         self.mn_target_data, self.mx_target_data = mn_target_data, mx_target_data
+
+    def get_raw_data(self):
+        return self.data[self.target].values
 
 
     def __len__(self):
@@ -112,20 +125,66 @@ def xtb(x):
     return int(min(n_bins-1, x // bin_width))
 
 
-def main():
-    window_size = 2
-    learning_rate = 0.05
-    batch_size = 5
-    width = 5
-    n_epochs = 15
+# return (P_model(x_n | window), distribution)
+def cond_prob(model, window, x_n):
+    assert len(window) == window_size - 1
 
+    window_list = list(window.cpu().detach().numpy())
+    #print(window, window_list)
+
+    # TODO debug this line
+    components = []
+    for x_n in range(0, n_bins):
+        window_list.append((x_n * bin_width) + (bin_width / 2))
+        data = torch.Tensor([window_list])
+        #print(data)
+        window_list.pop(-1)
+        components.append(exp(model(data).cpu().detach().numpy()[0]))
+
+    sm_c = sum(components)
+    xn_distro = [c_i / sm_c for c_i in components]
+
+    #print(xn_distro)
+    
+    #sm_c = sum(components)
+    #distro = [c / sm_c for c in components]
+    return xn_distro[xtb(x_n)], xn_distro
+
+# return normalized (lower, upper), constrained to [0,1]
+def conf_interval(distro, alpha=0.05):
+    assert len(distro) == n_bins
+
+    r_sum = 0
+    lower = -1
+    for i in range(n_bins):
+        if r_sum + distro[i] >= alpha:
+            lower = (i * bin_width) + (bin_width * (alpha - r_sum) / distro[i])
+            break
+
+        r_sum += distro[i]
+
+    r_sum = 0
+    upper = -1
+    for i in range(n_bins):
+        if r_sum + distro[i] >= 1 - alpha:
+            upper = (i * bin_width) + (bin_width * ((1 - alpha) - r_sum) / distro[i])
+            break
+
+        r_sum += distro[i]
+
+    return (lower, upper)
+
+
+def main():
     alcohol_ds = CustomDataset("Alcohol_Sales.csv", 'DATE', 'S4248SM144NCEN', window_size, batch_size)
+    raw_data = alcohol_ds.get_raw_data()
+    mn_target_data, mx_target_data = min(raw_data), max(raw_data)
 
     model = HMM(width, window_size) #Test()
     model.to(device)
 
     lls = []
-    optim = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    optim = torch.optim.SGD(model.parameters(), lr=learning_rate)
 
     for epoch_i in range(n_epochs):
         epoch_lls = []
@@ -134,6 +193,8 @@ def main():
         # TODO switch to using DataLoader
         for batch, _ in alcohol_ds:
             optim.zero_grad()
+
+            print(batch)
 
             batch = batch.to(device)
             batch_lls = model(batch)
@@ -149,6 +210,8 @@ def main():
 
         lls.append(epoch_lls)
 
+    print(lls)
+
     # TODO fix this
     lls = torch.Tensor(lls)
     print(lls)
@@ -156,6 +219,10 @@ def main():
     ll = torch.mean(lls, dim=-1)
     print(ll)
     print(torch.max(lls))
+
+    # TODO plot loss or some other metric to gauge training efficacy
+    #plt.plot([i for i in range(n_epochs)], ll)
+    #plt.show()
 
     # sanity check
     # iterate over all values for a small window size, see if sum to 1
@@ -169,6 +236,30 @@ def main():
 
     sm_prob = torch.sum(torch.exp(a))
     print(sm_prob) # should be 1
+
+    lower_bounds, upper_bounds = [], []
+
+    for batch, _ in alcohol_ds:
+
+        # TODO feed each batch in parallel
+        for window in batch:
+            test_window = window[:-1]
+            test_x_n = window[-1]
+
+            _, distro = cond_prob(model, test_window, test_x_n)
+            lower, upper = conf_interval(distro, alpha=0.1)
+
+            lower_bounds.append(lower * (mx_target_data - mn_target_data) + mn_target_data)
+            upper_bounds.append(upper * (mx_target_data - mn_target_data) + mn_target_data)
+
+    plt.plot([i for i in range(len(lower_bounds))], lower_bounds)
+    plt.plot([i for i in range(len(upper_bounds))], upper_bounds)
+
+    # TODO fix issues with raw_data plot (too ad-hoc)
+    plt.plot([i for i in range(len(lower_bounds))], raw_data[window_size:][:-(batch_size - window_size)])
+
+    plt.show()
+
 
 if __name__ == "__main__":
     main()
