@@ -14,7 +14,10 @@ import sys
 # TODO implement >1 stride lengths
 # TODO model the residuals and subtract assumed growth
 
-window_size = 2
+# TODO model trend (quadratic?) and seasonality separately
+# model the residuals, plot the mean
+
+window_size = 12
 learning_rate = 0.05
 batch_size = 5
 width = 5
@@ -23,7 +26,7 @@ n_epochs = 25
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 mn_norm_data_val, mx_norm_data_val = 0, 1
-n_bins = 10
+n_bins = 25
 norm_data_range = mx_norm_data_val - mn_norm_data_val
 bin_width = norm_data_range / n_bins
 
@@ -31,6 +34,8 @@ bin_width = norm_data_range / n_bins
 class CustomDataset(torch.utils.data.Dataset):
     def __init__(self, csv_file, id_col, target_col, window_size, batch_size):
         self.data = pd.read_csv(csv_file)
+        raw_data = self.data[target_col].values
+        self.quad_model = np.poly1d(np.polyfit([i for i in range(1, len(raw_data)+1)], raw_data, 2))
 
         # TODO decide how this can/should be used...
         self.id = id_col
@@ -40,13 +45,19 @@ class CustomDataset(torch.utils.data.Dataset):
         self.batch_size = batch_size
 
         # normalize input data to [0,1]
-        target_data = torch.from_numpy(self.data[self.target].values)
+        target_data = torch.Tensor([val - self.quad_model(i) for i, val in enumerate(self.data[self.target].values)])
         mn_target_data, mx_target_data = torch.aminmax(target_data)
         self.norm_target_data = np.array([(x - mn_target_data) / (mx_target_data - mn_target_data) for x in target_data])
         self.mn_target_data, self.mx_target_data = mn_target_data, mx_target_data
 
+        print(self.mn_target_data, self.mx_target_data, (self.mx_target_data - self.mn_target_data) / n_bins)
+        print(self.norm_target_data)
+
     def get_raw_data(self):
         return self.data[self.target].values
+
+    def run_quad_model(self, i):
+        return self.quad_model(i)
 
 
     def __len__(self):
@@ -56,7 +67,7 @@ class CustomDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         # shape: [batch_size, window_size]
         max_i = len(self.norm_target_data)-self.window_size
-        window = torch.Tensor([self.norm_target_data[i:i+self.window_size] for i in range(idx*self.batch_size, min(max_i, (idx+1)*self.batch_size))])
+        window = torch.Tensor([[self.norm_target_data[j] for j in range(i, i+window_size)] for i in range(idx*self.batch_size, min(max_i, (idx+1)*self.batch_size))])
 
         # shape: [batch_size]
         # TODO remove this, not predicting directly
@@ -178,7 +189,9 @@ def conf_interval(distro, alpha=0.05):
 def main():
     alcohol_ds = CustomDataset("Alcohol_Sales.csv", 'DATE', 'S4248SM144NCEN', window_size, batch_size)
     raw_data = alcohol_ds.get_raw_data()
-    mn_target_data, mx_target_data = min(raw_data), max(raw_data)
+
+    #mn_target_data, mx_target_data = min(raw_data), max(raw_data)
+    mn_target_data, mx_target_data = alcohol_ds.mn_target_data, alcohol_ds.mx_target_data
 
     model = HMM(width, window_size) #Test()
     model.to(device)
@@ -194,7 +207,7 @@ def main():
         for batch, _ in alcohol_ds:
             optim.zero_grad()
 
-            print(batch)
+            #print(batch)
 
             batch = batch.to(device)
             batch_lls = model(batch)
@@ -226,7 +239,7 @@ def main():
 
     # sanity check
     # iterate over all values for a small window size, see if sum to 1
-    assert window_size == 2
+    """assert window_size == 2
 
     data = torch.Tensor([[[a/20,b/20] for a in range(1, 21, 2)] for b in range(1, 21, 2)])
     data = torch.flatten(data, end_dim=-2)
@@ -235,10 +248,11 @@ def main():
     a = torch.Tensor([model(data[i*batch_size:(i+1)*batch_size]).tolist() for i in range(len(data) // batch_size)])
 
     sm_prob = torch.sum(torch.exp(a))
-    print(sm_prob) # should be 1
+    print(sm_prob) # should be 1"""
 
     lower_bounds, upper_bounds = [], []
 
+    i = 1
     for batch, _ in alcohol_ds:
 
         # TODO feed each batch in parallel
@@ -247,16 +261,25 @@ def main():
             test_x_n = window[-1]
 
             _, distro = cond_prob(model, test_window, test_x_n)
-            lower, upper = conf_interval(distro, alpha=0.1)
+            lower, upper = conf_interval(distro, alpha=0.05)
 
-            lower_bounds.append(lower * (mx_target_data - mn_target_data) + mn_target_data)
-            upper_bounds.append(upper * (mx_target_data - mn_target_data) + mn_target_data)
+            #print(lower, upper)
+            #print(lower * (mx_target_data - mn_target_data) + mn_target_data, upper * (mx_target_data - mn_target_data) + mn_target_data)
+
+            quad_output = alcohol_ds.run_quad_model(i)
+
+            lower_bounds.append(lower * (mx_target_data - mn_target_data) + mn_target_data + quad_output)
+            upper_bounds.append(upper * (mx_target_data - mn_target_data) + mn_target_data + quad_output)
+
+            i += 1
 
     plt.plot([i for i in range(len(lower_bounds))], lower_bounds)
     plt.plot([i for i in range(len(upper_bounds))], upper_bounds)
 
+    print(raw_data)
+
     # TODO fix issues with raw_data plot (too ad-hoc)
-    plt.plot([i for i in range(len(lower_bounds))], raw_data[window_size:][:-(batch_size - window_size)])
+    plt.plot([i for i in range(len(lower_bounds))], raw_data[:len(lower_bounds)])
 
     plt.show()
 
